@@ -1,8 +1,25 @@
 # Shared password-store
-## To Do
-
 - Adding a key
 - Using this repository as a shared password-store
+
+Put my own public key
+
+Useful variables
+GNUPG_HOME -> Location of gpg key. (default `~/.gpg`)
+PASSWORD_STORE_DIR -> Location of password store. (default `~/.pass`)
+
+## Import the keys to your keyring
+You will have to import the public-keys which will be inside `.public-keys`.
+`$ gpg --import plug-pass/.public-keys/*.asc`
+
+## Encrypting password-store for another user
+[How to re-encrpt .password-store using new gpg key - StackExchange](https://superuser.com/questions/1238892/how-to-re-encrypt-password-store-using-new-gpg-key)
+
+password-store default location: `~/.pass`, edit with `$ export PASSWORD_STORE_DIR=<path>`
+Then use `$ pass init <gpg-id>`
+
+# Fixing from here to below.
+# --------------------------------------------------------------------------
 
 ## Quick setup / How to use
 

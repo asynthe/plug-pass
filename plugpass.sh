@@ -17,10 +17,12 @@ fi
 
 # Restarting the gpg-agent and using pinentry-curses
 pkill gpg-agent
-gpg-agent --daemon --pinentry-program /usr/bin/pinentry-curses
+
+# Linux
+#gpg-agent --daemon --pinentry-program /usr/bin/pinentry-curses
 
 # NixOS
-#gpg-agent --pinentry-program=/home/ben/.nix-profile/bin/pinentry-curses --daemon
+gpg-agent --pinentry-program=/home/ben/.nix-profile/bin/pinentry-curses --daemon
 
 ################### MENU ###################
 

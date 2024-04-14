@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 
+# All in Docker?
+# - direnv
+# - gpg
+# - gpg-agent
+# - pinentry-curses
+
+# - After importing all the keys, check the expiration date
+# If expiration date is in around 30 days, show it on the front as a line
+
 ################### CONFIGURATION ###################
 
 # Set PASSWORD_STORE_DIR to current directory
 export PASSWORD_STORE_DIR=$(pwd)
-
-# Check if ./.gpg-keys directory exists, if not, create it
-if [ ! -d "./.gpg-keys" ]; then
-    mkdir -p ./.gpg-keys
-fi
 
 # Check if ./.gpg-keys directory exists, if not, create it
 if [ ! -d "./.gpg-keys" ]; then
@@ -33,7 +37,8 @@ display_menu() {
     echo "3. Add a key"
     echo "4. Remove a key"
     echo "5. Generate and add GPG key to password-store"
-    echo "6. Exit"
+    echo "6. Import all gpg keys to keyring"
+    echo "7. Exit"
 }
 
 # 1. Read a password
@@ -49,7 +54,7 @@ read_password() {
     pass show $pass_name
 }
 
-# 3. Add a key
+# 3. Add a key to database
 add_key() {
     read -p "Enter the name of the password to add key: " pass_name
     read -p "Enter the new key: " key
@@ -90,6 +95,9 @@ generate_and_add_gpg_key() {
 		    ;;
     esac
 
+     # Prompt for expiration date
+    read -p "Enter the expiration date (leave empty for no expiration, format: YYYY-MM-DD): " expire_date
+
     # Generate GPG key
     if [ "$key_type" == "RSA" ]; then
     gpg --batch --generate-key <<EOF
@@ -99,7 +107,7 @@ generate_and_add_gpg_key() {
     Subkey-Length: $key_length
     Name-Real: $name
     Name-Email: $email
-    Expire-Date: 2y
+    Expire-Date: $expire_date
 EOF
     else
 
@@ -107,15 +115,65 @@ EOF
     Key-Type: $key_type
     Name-Real: $name
     Name-Email: $email
-    Expire-Date: 2y
+    Expire-Date: $expire_date
 EOF
     fi
 
     # Export the GPG key
-    gpg --export-secret-keys --armor $email > ./.gpg-keys/$email.asc
+    echo "[+] The public key will be put into ./.gpg-keys"
+    echo "[!] The private key will be put into the currect folder,"
+    echo "remember to save it!"
+
+    gpg --export --armor $email > ./$email.pub.asc
+    gpg --export-secret-keys --armor $email > ./.gpg-keys/$email.sec.asc
+    
+    # Import the GPG key
+    gpg --import ./$email.pub.asc
+    gpg --import ./.gpg-keys/$email.sec.asc
+
+    # Set the key to ultimate trust
+    echo "trust" | gpg --command-fd 0 --edit-key $email
+    echo "5" | gpg --command-fd 0 --edit-key $email
+    echo "y" | gpg --command-fd 0 --edit-key $email
+    echo "quit" | gpg --command-fd 0 --edit-key $email
 
     # Add GPG key to Password Store
-    pass init $email
+    echo "Select the folders to grant access to (separated by commas):"
+    tree -d -L 1 ./
+    read -p "Enter your choice(s): " folder_choices
+    
+    # Prompt the user to select the folders
+    # Loop through selected folders and write fingerprint to corresponding .gpg-id files
+    for choice in $(echo $folder_choices | tr ',' ' '); do
+        case $choice in
+            */)
+                folder=$(echo "$choice" | sed 's|/$||') ;;
+            *)
+                folder="$choice" ;;
+        esac
+        if [ -n "$folder" ]; then
+            fingerprint=$(gpg --fingerprint --with-colons $email | awk -F: '/^fpr:/ {print $10; exit}')
+            echo "$fingerprint" > ./$folder/.gpg-id
+        fi
+    done
+}
+
+# 6) Import all gpg keys to keyring
+import_all_gpg_keys() {
+    # Do you want to import all gpg keys to your keyring? (Y/N)
+    read -p "Do you want to import all GPG keys to your keyring? (Y/N): " choice
+    case "$choice" in
+        [Yy])
+            gpg --import ./gpg-keys/*.asc
+            echo "Done!"
+            sleep 2
+            ;;
+        *)
+            echo "Returning to the main menu..."
+            sleep 2
+            return
+            ;;
+    esac
 }
 
 # Main script
@@ -128,24 +186,8 @@ while true; do
         3) add_key ;;
         4) remove_key ;;
 	5) generate_and_add_gpg_key ;;
-        6) exit ;;
+	6) import_all_gpg_keys ;;
+        7) exit ;;
         *) echo "Invalid option. Please choose again." ;;
     esac
 done
-
-# ---------------------------------
-
-# All in Docker?
-# - direnv
-# - gpg
-# - gpg-agent
-# - pinentry-curses
-
-# Menu
-# 1. Read a password
-#   asd
-# 2. Create a password
-#   asd
-
-# 3. Add a key
-#   find all .gpg-id files from specific directories.

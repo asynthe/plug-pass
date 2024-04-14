@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+#
+# uccpass, a wrapper around the pass(1) password manager for UCC
+#
+# David Adam <zanchey@ucc.gu.uwa.edu.au>, 2015
+# Felix von Perger <frekk@ucc.gu.uwa.edu.au>, 2019
+# James Arcus <jimbo@ucc.asn.au>, 2020
+# Mark Tearle <mtearle@ucc.asn.au>, 2021
+# (and your name here?)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+init () {
+    # Working directories for uccpass
+    UCCPASS_ROOT="/home/wheel/bin/uccpass"
+
+    # Blame [FVP] for the awful, nasty mess that is the following
+    WHEEL_KEYDIR=$UCCPASS_ROOT/keys/wheel
+    KEYS_WHEEL=$UCCPASS_ROOT/keys/wheel/*.gpg
+    COMMITTEE_KEYDIR=$UCCPASS_ROOT/keys/committee
+    KEYS_COMMITTEE=$UCCPASS_ROOT/keys/committee/*.gpg
+    KEYS_MIXED="$KEYS_WHEEL $KEYS_COMMITTEE"
+
+    KEYRING_TMP=$UCCPASS_ROOT/keyrings-generated
+    WHEEL_KEYRING=$KEYRING_TMP/wheel.gpg
+    COMMITTEE_KEYRING=$KEYRING_TMP/committee.gpg
+    MIXED_KEYRING=$KEYRING_TMP/mixed.gpg
+
+    COMMITTEE_SUBDIR="UCC/committee"
+    MIXED_SUBDIR="UCC/other"
+    # end nastiness
+
+    export GPG_TTY=`tty`
+    export PASSWORD_STORE_GPG_OPTS="--trust-model always"
+
+    # Important variables for pass
+    export PASSWORD_STORE_DIR="$UCCPASS_ROOT/store"
+    export PASSWORD_STORE_UMASK=007
+    export PATH="$UCCPASS_ROOT/pass/bin:$PATH"
+
+    # External programs used
+    PASS_CMD=pass
+    GPG_CMD=gpg2
+
+    # Check for external programs used
+    if ! type "$PASS_CMD" >/dev/null; then
+        echo "uccpass: can't find $PASS_CMD(1), is it installed correctly?"
+    fi
+    if ! type "$GPG_CMD" >/dev/null; then
+        echo "uccpass: can't find $GPG_CMD(1), is it installed correctly?"
+    fi
+
+    if [ -n "$UCCPASS_DEBUG" ]; then set -x; fi
+}
+
+add_to_shell () {
+    # If you add more shells here, don't forget to add them to the egrep below.
+    # 
+    # Use keychain. It is just better than futzing around with {ssh,gpg}-agent.
+    # Maybe when systemd is on everything then https://github.com/vodik/envoy
+    # will be better; until then, stick with what works.
+    case $USER_SHELL in
+        bash)
+            bash_profile=". $UCCPASS_ROOT/bash_profile.uccpass"
+            grep -qsF "$bash_profile" ~/.bash_profile || echo "$bash_profile" >> ~/.bash_profile
+            bashrc=". $UCCPASS_ROOT/bashrc.uccpass"
+            grep -qsF "$bashrc" ~/.bashrc || echo "$bashrc" >> ~/.bashrc
+            ;;
+        zsh)
+            zprofile=". $UCCPASS_ROOT/zprofile.uccpass"
+            grep -qsF "$zprofile" ~/.zprofile || echo "$zprofile" >> ~/.zprofile
+            zshenv=". $UCCPASS_ROOT/zshenv.uccpass"
+            grep -qsF "$zshenv" ~/.zshenv || echo "$zshenv" >> ~/.zshenv
+            ;;
+        fish)
+            fishconfig="source $UCCPASS_ROOT/config.uccpass.fish"
+            grep -qsF "$fishconfig" ~/.config/fish/config.fish || { mkdir -p ~/.config/fish; echo $fishconfig >> ~/.config/fish/config.fish ; }
+            ;;
+    esac
+}
+
+refresh_keys () {
+    GPG_KEYRING=$1
+    GPG_ID_LIST=$2
+    gpg2 --quiet --import $GPG_KEYRING
+    gpg2 --quiet --with-colons $GPG_KEYRING 2>/dev/null | grep '^pub' | cut -d: -f5 > $GPG_ID_LIST
+}
+
+# puts the keys into a format which gpg understands
+refresh_keydirs () {
+    # begin hacks - [FVP]
+    cat $KEYS_COMMITTEE > $COMMITTEE_KEYRING
+    cat $KEYS_COMMITTEE $KEYS_WHEEL > $MIXED_KEYRING
+    cat $KEYS_WHEEL > $WHEEL_KEYRING
+
+    refresh_keys $WHEEL_KEYRING $PASSWORD_STORE_DIR/.gpg-id 
+    refresh_keys $COMMITTEE_KEYRING $PASSWORD_STORE_DIR/$COMMITTEE_SUBDIR/.gpg-id
+    refresh_keys $MIXED_KEYRING $PASSWORD_STORE_DIR/$MIXED_SUBDIR/.gpg-id
+    # end hacks
+}
+
+new_user_setup () {
+    echo " >  Setting you up for uccpass"
+    USER=`whoami`
+    
+    export GIT_AUTHOR_NAME="`getent passwd $USER | cut -d: -f5`"
+    if [ -z "$GIT_AUTHOR_NAME" ]; then
+      echo "$0: WARNING: GECOS field is empty, error in 'getent passwd'?" 1>&2
+      export GIT_AUTHOR_NAME="$GIT_AUTHOR_EMAIL"
+    fi
+
+    if [ "$2" == "committee" ]; then
+        DEST_KEYDIR=$COMMITTEE_KEYDIR
+        KEYRING=$COMMITTEE_KEYRING
+        USER_TITLE="UCC Committee"
+        export GIT_AUTHOR_EMAIL="$USER+committee@ucc.gu.uwa.edu.au"
+    else
+        DEST_KEYDIR=$WHEEL_KEYDIR
+        KEYRING=$WHEEL_KEYRING
+        USER_TITLE="UCC Wheel Group"
+        export GIT_AUTHOR_EMAIL="$USER+wheel@ucc.gu.uwa.edu.au"
+    fi
+    # Set up an agent
+    echo -n " >> Checking for running GPG agent... "
+    # Checking for a running agent sucks!
+    if [ -z "$GPG_AGENT_INFO" ] || ! gpg-connect-agent /bye 2>/dev/null; then
+        echo "not found."
+        USER_SHELL=`basename $SHELL`
+        if echo $USER_SHELL | egrep -q 'zsh|bash|fish'; then
+            echo " [!] uccpass can install an password caching agent into your shell initialisation files."
+            echo -n " [?] Do you want to do so? [Y/n] " 
+            read install_agent
+            case $install_agent in
+                N|n|[Nn][Oo])
+                    ;;
+                *)
+                    add_to_shell
+                    echo " [!] You will need to start a new shell to pick up your new agent."
+                    ;;
+            esac
+        fi
+        echo -n " >> Starting GPG agent... "
+        eval `SHELL=/bin/sh keychain --eval --quiet --agents gpg`
+    fi
+    echo "ok."
+
+    # Generate new GPG key
+    if ! gpg --list-keys $GIT_AUTHOR_EMAIL >/dev/null 2>&1; then
+        echo " >> Generating new GPG key for $GIT_AUTHOR_NAME ($USER_TITLE)"
+        echo " [!] At the next prompt, you will be asked for a secure passphrase."
+        echo "     This controls access to the password store - please choose something secure."
+        echo " [?] Press ENTER to continue..."
+        read -r _
+        new_key_info="    Key-Type: default
+                Subkey-Type: default
+                Name-Real: $GIT_AUTHOR_NAME ($USER_TITLE)
+                Name-Email: $GIT_AUTHOR_EMAIL
+                Expire-Date: 5y
+                %ask-passphrase
+                 "
+        echo "$new_key_info" | gpg2 --gen-key --batch 2>/dev/null
+    fi
+
+    # Get the key fingerprint
+    KEY_FINGERPRINT=`gpg --list-secret-keys --with-fingerprint --with-colons $GIT_AUTHOR_EMAIL | grep '^fpr' | head -n 1 | cut -d: -f 10 2>/dev/null`
+
+    # Add to key list
+    # XXX: is it worth submitting these to an online keyserver?
+    echo -n " >> Adding your key to the shared keyring... "
+    if gpg2 --quiet --with-fingerprint --with-colons $KEYRING | grep -qF "$KEY_FINGERPRINT" 2>/dev/null; then
+        echo "already present!"
+    else
+        gpg2 --quiet --export --armor "$KEY_FINGERPRINT" >> "$DEST_KEYDIR/$USER.gpg" 2>/dev/null && echo "ok."
+    fi
+
+    # Done!
+    echo " > uccpass setup complete."
+    echo " [!] Ask someone with existing access to the password store to run \`uccpass reload\` or \`uccpass reload committee\`."
+}
+
+# re-initialises the password store at a given directory using keys from the .gpg-id file in that directory
+reload_dir () {
+    SUBDIR=$1
+    echo "The following keys have access to the passwords in ($PASSWORD_STORE_DIR/$SUBDIR)"
+    echo "Note, for subdirectories, the keys in .gpg-id may override the keys below. Run 'uccpass reload committee|other' to see what keys will be used there."
+    gpg2 --with-colons --list-keys `cat $PASSWORD_STORE_DIR/$SUBDIR/.gpg-id` | grep '^uid' | cut -d: -f 10
+    echo
+    read -p "Press Ctrl+C to cancel or enter to continue: "
+    if [ "x$SUBDIR" == "x" ]; then
+        command pass init `cat $PASSWORD_STORE_DIR/.gpg-id`
+    else
+        # to limit the keys used to encrypt passwords in a particular subdir, the key IDs must be supplied on the command line
+        command pass init --path="$SUBDIR" `cat $PASSWORD_STORE_DIR/$SUBDIR/.gpg-id`
+    fi
+}
+
+init
+
+case "$1" in
+    setup)
+        refresh_keydirs
+        new_user_setup $@
+        refresh_keydirs
+        ;;
+    reload)
+        refresh_keydirs
+        if [ "$2" == "committee" ]; then
+            reload_dir "$COMMITTEE_SUBDIR"
+            exit 0
+        elif [ "$2" == "other" ]; then
+            reload_dir "$MIXED_SUBDIR"
+            exit 0
+        else
+            reload_dir ""
+        fi
+        ;;
+    age)
+	echo -e "UPDATED\tCREATED\tFILE\tANNOTATION"
+	find $PASSWORD_STORE_DIR -name '*.gpg' -print0 | 
+            while IFS= read -r -d '' line; do
+		pushd `dirname $line` >/dev/null
+		entry=$(echo $line | sed "s#$PASSWORD_STORE_DIR/##" | sed 's/.gpg$//')
+	        #git log --oneline $line | grep -v "Reencrypt" | grep -v "uncommitted" | head -1
+	        #git log --oneline $line | grep -v "Reencrypt" | grep -v "uncommitted" | tail -n 1
+		readarray -d "|" -n 4 -t updatedgl <<< $( git log --pretty=tformat:"%ci|%cr|%s|" $line | grep -v "Reencrypt" | grep -v "uncommitted" | head -1 )
+		readarray -d "|" -n 4 -t createdgl <<< $(git log --pretty=tformat:"%ci|%cr|%s|" $line | grep -v "Reencrypt" | grep -v "uncommitted" | tail -n 1)
+		readarray -d " " -n 1 -t updateddate <<< $( echo ${updatedgl[0]} )
+		readarray -d " " -n 1 -t createddate <<< $( echo ${createdgl[0]} )
+		age=${updatedgl[1]}
+		annotation=${updatedgl[2]}
+		echo -e "${updateddate[*]}\t${createddate[*]}\t$entry\t$annotation ($age)"
+		popd >/dev/null
+            done
+        ;;
+    help|--help)
+        command pass $@
+        echo "uccpass also supports the following commands:"
+        echo "setup [committee]: generate a new key and insert it into the password store"
+        echo "  specify the 'committee' argument if you are wanting to access '$COMMITTEE_SUBDIR' instead of the whole password store (ie. if you are on committee)"
+        echo "  and add it to the committee key list instead of the wheel list"
+        echo "reload [committee|other]: re-encrypt the password store"
+        echo "  if 'committee' is specified then reload only the committee password store"
+        echo "  if 'other' is specified then reload only the passwords under $MIXED_SUBDIR"
+	echo "age: reports on the age of items stored in uccpass"
+        ;;
+    insert|edit|generate|rm|cp|mv|git)
+        refresh_keydirs
+        command pass $@
+        ;;
+    *)
+        command pass $@
+        ;;
+esac
+
+# vim: autoindent tabstop=4 shiftwidth=4 expandtab softtabstop=4

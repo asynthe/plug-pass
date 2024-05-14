@@ -9,6 +9,8 @@
 # - After importing all the keys, check the expiration date
 # If expiration date is in around 30 days, show it on the front as a line
 
+set -x
+
 ################### CONFIGURATION ###################
 
 # Set PASSWORD_STORE_DIR to current directory
@@ -23,10 +25,10 @@ fi
 pkill gpg-agent
 
 # Linux
-#gpg-agent --daemon --pinentry-program /usr/bin/pinentry-curses
+gpg-agent --daemon --pinentry-program /usr/bin/pinentry-curses
 
 # NixOS
-gpg-agent --pinentry-program=/home/ben/.nix-profile/bin/pinentry-curses --daemon
+#gpg-agent --pinentry-program=/home/ben/.nix-profile/bin/pinentry-curses --daemon
 
 ################### MENU ###################
 
